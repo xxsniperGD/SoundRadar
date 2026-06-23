@@ -1,5 +1,9 @@
 # SoundRadar
 
+![SoundRadar — see where game sounds come from](docs/hero.png)
+
+> Illustration — the radar lights blocks toward each sound; brighter = louder/closer.
+
 **A free visual surround-sound radar for gamers who can't rely on stereo
 hearing.** SoundRadar turns a game's surround audio into a glowing radar around
 your screen edge, so the **direction** of in-game sounds can be **seen** instead
