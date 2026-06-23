@@ -56,8 +56,8 @@ class RouterConfig:
     source_name: str | None = None  # None -> default speaker loopback (VAIO3)
     output_name: str = "Headphones"
     out_gain: float = 0.5
-    target_buffer_ms: float = 40.0  # latency cushion before playback starts
-    max_buffer_ms: float = 120.0    # drop oldest beyond this (drift guard)
+    target_buffer_ms: float = 60.0  # latency cushion playback steers toward
+    max_buffer_ms: float = 400.0    # hard safety cap (drift handled smoothly)
 
 
 class MonoRouter:
@@ -152,7 +152,8 @@ class MonoRouter:
     def _playback(self) -> None:
         out = sc.get_speaker(self.cfg.output_name)
         n = self.cfg.blocksize
-        target = int(self.cfg.target_buffer_ms / 1000 * self.cfg.samplerate)
+        sr = self.cfg.samplerate
+        target = int(self.cfg.target_buffer_ms / 1000 * sr)
         # prime: wait until the cushion is filled so we never start starved
         while not self._stop.is_set():
             with self._buf_lock:
@@ -160,9 +161,21 @@ class MonoRouter:
             if ready >= target:
                 break
             time.sleep(0.002)
-        with out.player(samplerate=self.cfg.samplerate, channels=2,
-                        blocksize=n) as player:
+        out_idx = np.arange(n, dtype=np.float32)
+        with out.player(samplerate=sr, channels=2, blocksize=n) as player:
             while not self._stop.is_set():
-                mono = self._pull(n)
-                self.peak_out = float(np.max(np.abs(mono))) if mono.size else 0.0
-                player.play(np.stack([mono, mono], axis=1))
+                with self._buf_lock:
+                    fill = self._buf_samples
+                # Steer the buffer toward `target` by nudging how many input
+                # samples feed each output block, capped at +/-1% (inaudible
+                # pitch shift). This absorbs capture/playback clock drift with
+                # no clicks instead of dropping/padding whole chunks.
+                adj = max(-0.01, min(0.01, (fill - target) / (target * 4.0 + 1.0)))
+                pull_n = max(8, int(round(n * (1.0 + adj))))
+                block = self._pull(pull_n)
+                if pull_n != n:
+                    src = np.arange(pull_n, dtype=np.float32)
+                    block = np.interp(np.linspace(0.0, pull_n - 1.0, n),
+                                      src, block).astype(np.float32)
+                self.peak_out = float(np.max(np.abs(block))) if block.size else 0.0
+                player.play(np.stack([block, block], axis=1))

@@ -19,8 +19,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import signal
+import sys
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -28,7 +30,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from soundradar.audio import CaptureConfig, LoopbackCapture, list_loopback_devices
 from soundradar.analysis import (AnalysisConfig, AdaptiveBaseline,
                                  DirectionEnvelopes, channels_to_directions)
-from soundradar.overlay import OverlayWindow, OverlayStyle
+from soundradar.overlay import OverlayWindow, OverlayStyle, CHANNEL_ANGLES
 from soundradar.router import MonoRouter, RouterConfig
 from soundradar.proc_loopback import ProcessLoopbackCapture, find_process_pids
 from soundradar import settings as settings_mod
@@ -111,32 +113,43 @@ def main() -> int:
     acfg = AnalysisConfig(floor_db=floor_db, ceil_db=args.ceil_db,
                           gain=cfg.gain, attack_ms=args.attack_ms,
                           decay_ms=cfg.decay_ms, contrast=contrast)
-    if args.all_apps or args.process or args.pid:
-        if args.all_apps:
-            pid, include, desc = os.getpid(), False, "all apps (except SoundRadar)"
-        elif args.pid:
-            pid, include, desc = args.pid, True, f"pid {args.pid}"
+    cli_capture = (args.all_apps or args.process or args.pid
+                   or args.route_audio or args.device)
+    if cli_capture:
+        # explicit command-line capture (power users / debugging)
+        if args.all_apps or args.process or args.pid:
+            if args.all_apps:
+                pid, include, desc = os.getpid(), False, "all apps"
+            elif args.pid:
+                pid, include, desc = args.pid, True, f"pid {args.pid}"
+            else:
+                pids = find_process_pids(args.process)
+                if not pids:
+                    print(f"no running process matching '{args.process}'")
+                    return 1
+                pid, include, desc = pids[0], True, args.process
+            cap = ProcessLoopbackCapture(pid, channels=args.channels,
+                                         include=include,
+                                         play_mono=args.route_audio,
+                                         output_name=args.output,
+                                         out_gain=cfg.out_gain)
+        elif args.route_audio:
+            cap = MonoRouter(RouterConfig(source_name=args.device,
+                                          output_name=args.output,
+                                          out_gain=cfg.out_gain))
         else:
-            pids = find_process_pids(args.process)
-            if not pids:
-                print(f"no running process matching '{args.process}'")
-                return 1
-            pid, include, desc = pids[0], True, f"{args.process} (pid {pids[0]})"
-        cap = ProcessLoopbackCapture(pid, channels=args.channels,
-                                     include=include,
-                                     play_mono=args.route_audio,
-                                     output_name=args.output,
-                                     out_gain=cfg.out_gain)
-        print(f"per-app capture: {desc} @ {args.channels}ch"
-              + (f" + mono mix -> '{args.output}'" if args.route_audio
-                 else " — audio untouched"))
-    elif args.route_audio:
-        cap = MonoRouter(RouterConfig(source_name=args.device,
-                                      output_name=args.output,
+            cap = LoopbackCapture(CaptureConfig(device_name=args.device))
+    elif cfg.mode == "surround" and cfg.capture_device:
+        # surround: device-loopback a 7.1 device + play full mono mix
+        cap = MonoRouter(RouterConfig(source_name=cfg.capture_device,
+                                      output_name=cfg.output_device,
                                       out_gain=cfg.out_gain))
-        print(f"routing full mono mix -> '{args.output}'")
+        print(f"surround: '{cfg.capture_device}' -> mono mix to "
+              f"'{cfg.output_device}'")
     else:
-        cap = LoopbackCapture(CaptureConfig(device_name=args.device))
+        # stereo: capture all system audio (pre-mono), no audio changes
+        cap = ProcessLoopbackCapture(os.getpid(), include=False, channels=2)
+        print("stereo: all system audio (no audio changes)")
     cap.start()
 
     tick_fraction, gamma = _size_to_tick_gamma(cfg.size)
@@ -156,15 +169,23 @@ def main() -> int:
     # system-tray icon: a magenta dot near the clock. Right-click -> Pause/Quit
     # so there's no console window to hunt down.
     app.setQuitOnLastWindowClosed(False)
-    _icon_pix = QtGui.QPixmap(32, 32)
-    _icon_pix.fill(QtCore.Qt.GlobalColor.transparent)
-    _ip = QtGui.QPainter(_icon_pix)
-    _ip.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-    _ip.setPen(QtCore.Qt.PenStyle.NoPen)
-    _ip.setBrush(QtGui.QColor(255, 0, 220))
-    _ip.drawEllipse(3, 3, 26, 26)
-    _ip.end()
-    tray = QtWidgets.QSystemTrayIcon(QtGui.QIcon(_icon_pix))
+    _base = getattr(sys, "_MEIPASS",
+                    os.path.dirname(os.path.abspath(__file__)))
+    _ico = os.path.join(_base, "soundradar.ico")
+    if os.path.exists(_ico):
+        _app_icon = QtGui.QIcon(_ico)
+    else:
+        _pix = QtGui.QPixmap(32, 32)
+        _pix.fill(QtCore.Qt.GlobalColor.transparent)
+        _ip = QtGui.QPainter(_pix)
+        _ip.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        _ip.setPen(QtCore.Qt.PenStyle.NoPen)
+        _ip.setBrush(QtGui.QColor(255, 0, 220))
+        _ip.drawEllipse(3, 3, 26, 26)
+        _ip.end()
+        _app_icon = QtGui.QIcon(_pix)
+    app.setWindowIcon(_app_icon)
+    tray = QtWidgets.QSystemTrayIcon(_app_icon)
     tray.setToolTip("SoundRadar")
     menu = QtWidgets.QMenu()
     act_pause = menu.addAction("Pause overlay")
@@ -223,13 +244,38 @@ def main() -> int:
 
     def open_settings():
         if _win["w"] is None:
-            _win["w"] = SettingsWindow(cfg, apply_settings)
+            _win["w"] = SettingsWindow(cfg, apply_settings, on_test=start_test)
         w = _win["w"]
         w.show(); w.raise_(); w.activateWindow()
 
     last = {"t": time.perf_counter(), "ch": None}
+    test = {"active": False, "t": 0.0}
+
+    def start_test():
+        test["t"] = 0.0
+        test["active"] = True
+
+    def test_tick():
+        if not test["active"]:
+            return
+        test["t"] += 0.016
+        if test["t"] > 6.0:           # one full lap then back to live audio
+            test["active"] = False
+            overlay.set_channel_intensities({})
+            return
+        ang = (test["t"] / 6.0) * 360.0   # sweep a sound around the compass
+        vals = {}
+        for lbl, a in CHANNEL_ANGLES.items():
+            if lbl in ("L", "R"):
+                continue
+            d = abs(a - ang)
+            d = min(d, 360.0 - d)
+            vals[lbl] = max(0.0, 1.0 - d / 45.0)
+        overlay.set_channel_intensities(vals)
 
     def tick():
+        if test["active"]:
+            return                    # test sweep drives the overlay
         now = time.perf_counter()
         dt = now - last["t"]
         last["t"] = now
@@ -245,6 +291,10 @@ def main() -> int:
     timer = QtCore.QTimer()
     timer.timeout.connect(tick)
     timer.start(16)  # ~60 fps
+
+    test_timer = QtCore.QTimer()
+    test_timer.timeout.connect(test_tick)
+    test_timer.start(16)
 
     # keep the overlay above the game (some games grab top-most)
     topmost = QtCore.QTimer()

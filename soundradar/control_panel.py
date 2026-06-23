@@ -1,128 +1,301 @@
-"""Settings control panel — live sliders + colour picker for every knob.
+"""Settings control panel — modern dark, tabbed, compact, with presets.
 
 Opened from the tray icon. Each change updates the Settings object, calls the
-apply callback (which updates the running radar live) and saves to disk.
+apply callback (updates the running radar live) and saves to disk.
 """
 
 from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .settings import Settings
+from . import settings as settings_mod
+from .settings import PRESET_FIELDS, Settings
+from .audio import list_loopback_devices
+
+ACCENT = "#4ECDC4"        # refined muted teal
+ACCENT_SOFT = "rgba(78, 205, 196, 0.12)"
+
+STYLE = f"""
+* {{ font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 13px; }}
+QWidget {{ background: #101116; color: #e9ebf1; }}
+QTabWidget::pane {{ border: 1px solid #20232c; border-radius: 12px; top: -1px;
+                    background: #14161c; }}
+QTabBar::tab {{ background: transparent; color: #757b87; padding: 9px 20px;
+                border: none; margin-right: 2px; letter-spacing: 0.3px; }}
+QTabBar::tab:selected {{ color: #ffffff; border-bottom: 2px solid {ACCENT}; }}
+QTabBar::tab:hover {{ color: #c2c6d0; }}
+QGroupBox {{ border: 1px solid #20232c; border-radius: 12px; margin-top: 16px;
+             padding: 18px 16px 8px 16px; background: #181a21; }}
+QGroupBox::title {{ subcontrol-origin: margin; left: 14px; padding: 0 6px;
+                    color: #8b93a0; font-weight: 600; text-transform: uppercase;
+                    letter-spacing: 0.6px; font-size: 11px; }}
+QLabel#hint {{ color: #757b87; }}
+QSlider::groove:horizontal {{ height: 4px; background: #262a34; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: #eef1f6; width: 14px; height: 14px;
+                              margin: -6px 0; border-radius: 7px; }}
+QSlider::handle:horizontal:hover {{ background: {ACCENT}; }}
+QPushButton {{ background: #1d2029; border: 1px solid #2a2e39; border-radius: 8px;
+               padding: 8px 12px; color: #e9ebf1; }}
+QPushButton:hover {{ background: #242833; border-color: #363b48; }}
+QPushButton#accent {{ background: transparent; border: 1px solid {ACCENT};
+                      color: {ACCENT}; font-weight: 600; padding: 10px;
+                      letter-spacing: 0.4px; }}
+QPushButton#accent:hover {{ background: {ACCENT_SOFT}; }}
+QComboBox {{ background: #1d2029; border: 1px solid #2a2e39; border-radius: 8px;
+             padding: 6px 10px; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{ background: #1d2029; border: 1px solid #2a2e39;
+                               selection-background-color: {ACCENT};
+                               selection-color: #101116; outline: none; }}
+QFrame#card {{ background: #181a21; border: 1px solid #20232c; border-radius: 12px; }}
+QLabel#infotitle {{ color: #ffffff; font-weight: 600; }}
+QToolTip {{ background: #1d2029; color: #e9ebf1; border: 1px solid #2a2e39;
+            padding: 4px 6px; }}
+QInputDialog, QMessageBox {{ background: #14161c; }}
+"""
 
 
 class SettingsWindow(QtWidgets.QWidget):
-    def __init__(self, settings: Settings, on_change):
+    def __init__(self, settings: Settings, on_change, on_test=None):
         super().__init__(None)
         self.s = settings
         self.on_change = on_change
-        self.setWindowTitle("SoundRadar — Settings")
-        self.setMinimumWidth(380)
-        lay = QtWidgets.QVBoxLayout(self)
+        self.on_test = on_test
+        self._rows = []          # (field, slider, disp_fn, value_label)
+        self._presets = settings_mod.load_presets()
+        self.setWindowTitle("SoundRadar")
+        self.setStyleSheet(STYLE)
+        self.setFixedWidth(440)
 
-        lay.addWidget(self._heading("Behaviour"))
-        self._slider(lay, "Sensitivity", 0, 100, settings.sensitivity,
-                     lambda v: self._set("sensitivity", v),
-                     "react to more / quieter sounds")
-        self._slider(lay, "Adapt (events vs constant)", 0, 100, settings.adapt,
-                     lambda v: self._set("adapt", v),
-                     "higher = steady background fades, only changes show")
-        self._slider(lay, "Fade speed (ms)", 100, 900, settings.decay_ms,
-                     lambda v: self._set("decay_ms", v),
-                     "how slowly a block fades out")
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 14)
+        root.setSpacing(12)
 
-        lay.addWidget(self._heading("Look"))
-        self._slider(lay, "Size / growth", 0, 100, settings.size,
-                     lambda v: self._set("size", v),
-                     "how big blocks grow with loudness")
-        self._slider(lay, "Brightness", 50, 400, settings.gain * 100,
-                     lambda v: self._set("gain", v / 100.0))
-        self._slider(lay, "Number of blocks", 6, 30, settings.segments,
-                     lambda v: self._set("segments", int(v)))
-        self._slider(lay, "Bar thickness (px)", 8, 70, settings.thickness,
-                     lambda v: self._set("thickness", int(v)))
-        self._slider(lay, "Opacity (%)", 25, 100, settings.opacity * 100,
-                     lambda v: self._set("opacity", v / 100.0))
+        title = QtWidgets.QLabel("SoundRadar")
+        tf = title.font(); tf.setPointSize(15); tf.setBold(True); title.setFont(tf)
+        root.addWidget(title)
 
-        # monitor selector (only meaningful with >1 screen, but always shown)
+        root.addLayout(self._preset_bar())
+
+        if on_test is not None:
+            tb = QtWidgets.QPushButton("◎   Test radar")
+            tb.setObjectName("accent")
+            tb.setToolTip("Sweep a sound around the ring for ~6s — see and tune "
+                          "the radar without a game.")
+            tb.clicked.connect(lambda: self.on_test())
+            root.addWidget(tb)
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._radar_tab(), "Radar")
+        tabs.addTab(self._setup_tab(), "Setup")
+        root.addWidget(tabs)
+
+        foot = QtWidgets.QLabel("Changes apply live and save automatically.")
+        foot.setObjectName("hint")
+        root.addWidget(foot)
+
+    # -- presets ---------------------------------------------------------
+    def _preset_bar(self):
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Preset"))
+        self._preset_combo = QtWidgets.QComboBox()
+        self._reload_preset_combo()
+        self._preset_combo.activated.connect(self._on_preset_pick)
+        row.addWidget(self._preset_combo, 1)
+        save = QtWidgets.QPushButton("Save…")
+        save.clicked.connect(self._save_preset)
+        row.addWidget(save)
+        dele = QtWidgets.QPushButton("Delete")
+        dele.clicked.connect(self._delete_preset)
+        row.addWidget(dele)
+        return row
+
+    def _reload_preset_combo(self):
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.clear()
+        self._preset_combo.addItem("— choose preset —")
+        for name in sorted(self._presets):
+            self._preset_combo.addItem(name)
+        self._preset_combo.setCurrentIndex(0)
+        self._preset_combo.blockSignals(False)
+
+    def _on_preset_pick(self, idx):
+        if idx <= 0:
+            return
+        name = self._preset_combo.itemText(idx)
+        data = self._presets.get(name, {})
+        for k, v in data.items():
+            setattr(self.s, k, v)
+        self.on_change()
+        self._refresh()
+
+    def _save_preset(self):
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save preset",
+                                                  "Preset name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        self._presets[name] = {f: getattr(self.s, f) for f in PRESET_FIELDS}
+        settings_mod.save_presets(self._presets)
+        self._reload_preset_combo()
+        self._preset_combo.setCurrentText(name)
+
+    def _delete_preset(self):
+        name = self._preset_combo.currentText()
+        if name in self._presets:
+            del self._presets[name]
+            settings_mod.save_presets(self._presets)
+            self._reload_preset_combo()
+
+    # -- tabs ------------------------------------------------------------
+    def _radar_tab(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(12, 8, 12, 12); v.setSpacing(12)
+
+        beh = self._card("Behaviour"); g = beh.layout()
+        self._row(g, 0, "Sensitivity", "sensitivity", 0, 100)
+        self._row(g, 1, "Adapt", "adapt", 0, 100)
+        self._row(g, 2, "Fade", "decay_ms", 100, 900)
+        v.addWidget(beh)
+
+        app = self._card("Appearance"); g = app.layout()
+        self._row(g, 0, "Size", "size", 0, 100)
+        self._row(g, 1, "Brightness", "gain", 50, 400, mul=100)
+        self._row(g, 2, "Blocks", "segments", 6, 30, integer=True)
+        self._row(g, 3, "Thickness", "thickness", 8, 70, integer=True)
+        self._row(g, 4, "Opacity", "opacity", 25, 100, mul=100)
+        g.addWidget(QtWidgets.QLabel("Colour"), 5, 0)
+        self._sw = QtWidgets.QPushButton(); self._sw.setFixedSize(54, 22)
+        self._sw.clicked.connect(self._pick_colour); self._paint_swatch()
+        g.addWidget(self._sw, 5, 1, QtCore.Qt.AlignmentFlag.AlignLeft)
+        v.addWidget(app)
+        v.addStretch(1)
+        return w
+
+    def _setup_tab(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(12, 8, 12, 12); v.setSpacing(12)
+
+        cap = self._card("Capture"); g = cap.layout()
+        g.addWidget(QtWidgets.QLabel("Mode"), 0, 0)
+        self._mode = QtWidgets.QComboBox()
+        self._mode.addItem("Stereo — no setup, left/right", "stereo")
+        self._mode.addItem("Surround — 7.1 device, front/back", "surround")
+        self._mode.setCurrentIndex(1 if self.s.mode == "surround" else 0)
+        self._mode.currentIndexChanged.connect(self._on_mode)
+        g.addWidget(self._mode, 0, 1, 1, 2)
+        g.addWidget(QtWidgets.QLabel("Device"), 1, 0)
+        self._dev = QtWidgets.QComboBox()
+        names = [m.name for m in list_loopback_devices()]
+        self._dev.addItems(names or ["(no loopback devices found)"])
+        if self.s.capture_device in names:
+            self._dev.setCurrentText(self.s.capture_device)
+        self._dev.currentTextChanged.connect(
+            lambda t: self._set("capture_device", t))
+        self._dev.setEnabled(self.s.mode == "surround")
+        g.addWidget(self._dev, 1, 1, 1, 2)
+        note = QtWidgets.QLabel("Restart SoundRadar (tray ▸ Quit, reopen) to "
+                                "apply capture changes.")
+        note.setObjectName("hint"); note.setWordWrap(True)
+        g.addWidget(note, 2, 0, 1, 3)
+        v.addWidget(cap)
+
+        disp = self._card("Display & audio"); g = disp.layout()
+        g.addWidget(QtWidgets.QLabel("Monitor"), 0, 0)
         screens = QtWidgets.QApplication.instance().screens()
-        mrow = QtWidgets.QHBoxLayout()
-        mrow.addWidget(QtWidgets.QLabel("Monitor"))
         combo = QtWidgets.QComboBox()
         for i, sc in enumerate(screens):
-            g = sc.geometry()
-            primary = " (primary)" if sc == QtWidgets.QApplication.primaryScreen() else ""
-            combo.addItem(f"{i + 1}: {g.width()}x{g.height()}{primary}", i)
-        combo.setCurrentIndex(max(0, min(settings.monitor, len(screens) - 1)))
+            geo = sc.geometry()
+            star = " •" if sc == QtWidgets.QApplication.primaryScreen() else ""
+            combo.addItem(f"{i + 1}: {geo.width()}×{geo.height()}{star}", i)
+        combo.setCurrentIndex(max(0, min(self.s.monitor, len(screens) - 1)))
         combo.currentIndexChanged.connect(
             lambda idx: self._set("monitor", combo.itemData(idx)))
-        mrow.addWidget(combo)
-        mrow.addStretch(1)
-        lay.addLayout(mrow)
+        g.addWidget(combo, 0, 1, 1, 2)
+        self._row(g, 1, "Volume", "out_gain", 0, 100, mul=100)
+        v.addWidget(disp)
 
-        # colour picker row
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("Colour"))
-        self._col_btn = QtWidgets.QPushButton()
-        self._col_btn.setFixedWidth(120)
-        self._paint_btn()
-        self._col_btn.clicked.connect(self._pick_colour)
-        row.addWidget(self._col_btn)
-        row.addStretch(1)
-        lay.addLayout(row)
-
-        lay.addWidget(self._heading("Audio"))
-        self._slider(lay, "Headphone volume (%)", 0, 100, settings.out_gain * 100,
-                     lambda v: self._set("out_gain", v / 100.0),
-                     "volume of the mono mix in your headphones")
-
-        note = QtWidgets.QLabel("Changes apply live and are saved automatically.")
-        note.setStyleSheet("color: gray;")
-        lay.addWidget(note)
+        card = QtWidgets.QFrame(); card.setObjectName("card")
+        cl = QtWidgets.QVBoxLayout(card)
+        cl.setContentsMargins(14, 12, 14, 12); cl.setSpacing(8)
+        t = QtWidgets.QLabel("Keep an app off the radar")
+        t.setObjectName("infotitle"); cl.addWidget(t)
+        body = QtWidgets.QLabel(
+            "The radar shows whatever is sent to your capture device. To stop an "
+            "app (e.g. voice chat) showing up, set its output to your headphones "
+            "in Windows Volume mixer — you'll still hear it, it just won't appear.")
+        body.setObjectName("hint"); body.setWordWrap(True); cl.addWidget(body)
+        mix = QtWidgets.QPushButton("Open Windows Volume mixer")
+        mix.clicked.connect(self._open_mixer); cl.addWidget(mix)
+        v.addWidget(card)
+        v.addStretch(1)
+        return w
 
     # -- helpers ---------------------------------------------------------
-    def _heading(self, text):
-        lbl = QtWidgets.QLabel(text)
-        f = lbl.font(); f.setBold(True); lbl.setFont(f)
-        lbl.setContentsMargins(0, 8, 0, 0)
-        return lbl
+    def _card(self, title):
+        box = QtWidgets.QGroupBox(title)
+        grid = QtWidgets.QGridLayout(box)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnMinimumWidth(2, 34)
+        grid.setHorizontalSpacing(12); grid.setVerticalSpacing(10)
+        return box
 
-    def _slider(self, lay, label, lo, hi, value, on_val, tip=""):
-        row = QtWidgets.QVBoxLayout()
-        head = QtWidgets.QHBoxLayout()
+    def _row(self, grid, r, label, field, lo, hi, mul=1, integer=False):
+        def disp(val):
+            return int(round(val * mul))
+
+        def parse(x):
+            v = x / mul
+            return int(v) if integer else v
+
         name = QtWidgets.QLabel(label)
-        val_lbl = QtWidgets.QLabel(str(int(value)))
-        val_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        head.addWidget(name)
-        head.addWidget(val_lbl)
-        row.addLayout(head)
         sld = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         sld.setMinimum(int(lo)); sld.setMaximum(int(hi))
-        sld.setValue(int(value))
-        if tip:
-            sld.setToolTip(tip); name.setToolTip(tip)
+        sld.setValue(disp(getattr(self.s, field)))
+        val = QtWidgets.QLabel(str(sld.value())); val.setObjectName("hint")
+        val.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                         | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
-        def changed(v):
-            val_lbl.setText(str(v))
-            on_val(v)
+        def changed(x):
+            val.setText(str(x))
+            self._set(field, parse(x))
         sld.valueChanged.connect(changed)
-        row.addWidget(sld)
-        lay.addLayout(row)
+        self._rows.append((field, sld, disp, val))
+        grid.addWidget(name, r, 0); grid.addWidget(sld, r, 1)
+        grid.addWidget(val, r, 2)
+
+    def _refresh(self):
+        """Push current settings back into the widgets (after loading a preset)."""
+        for field, sld, disp, val in self._rows:
+            sld.blockSignals(True)
+            sld.setValue(disp(getattr(self.s, field)))
+            sld.blockSignals(False)
+            val.setText(str(sld.value()))
+        self._paint_swatch()
+
+    def _on_mode(self, idx):
+        mode = self._mode.itemData(idx)
+        self._dev.setEnabled(mode == "surround")
+        self._set("mode", mode)
 
     def _set(self, field, value):
         setattr(self.s, field, value)
         self.on_change()
 
-    def _paint_btn(self):
-        c = self.s.color
-        self._col_btn.setStyleSheet(
-            f"background-color: {c}; color: white; border: 1px solid #888;")
-        self._col_btn.setText(c)
+    def _paint_swatch(self):
+        self._sw.setStyleSheet(
+            f"background:{self.s.color}; border:1px solid #555; border-radius:5px;")
 
     def _pick_colour(self):
-        cur = QtGui.QColor(self.s.color)
-        col = QtWidgets.QColorDialog.getColor(cur, self, "Pick radar colour")
+        col = QtWidgets.QColorDialog.getColor(
+            QtGui.QColor(self.s.color), self, "Radar colour")
         if col.isValid():
             self.s.color = col.name().upper()
-            self._paint_btn()
+            self._paint_swatch()
             self.on_change()
+
+    def _open_mixer(self):
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl("ms-settings:apps-volume"))
