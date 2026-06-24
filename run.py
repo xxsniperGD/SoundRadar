@@ -110,8 +110,10 @@ def main() -> int:
     # panel); CLI keeps the mode flags (--route-audio, --device, --process...).
     cfg = settings_mod.load()
     contrast, floor_db = _sens_to_contrast_floor(cfg.sensitivity)
+    # gain stays 1.0 here: loudness drives block SIZE only. "Brightness" is a
+    # separate overlay multiplier (st.brightness) so the two are independent.
     acfg = AnalysisConfig(floor_db=floor_db, ceil_db=args.ceil_db,
-                          gain=cfg.gain, attack_ms=args.attack_ms,
+                          gain=1.0, attack_ms=args.attack_ms,
                           decay_ms=cfg.decay_ms, contrast=contrast)
     cli_capture = (args.all_apps or args.process or args.pid
                    or args.route_audio or args.device)
@@ -162,6 +164,7 @@ def main() -> int:
                                          opacity=cfg.opacity,
                                          tick_fraction=tick_fraction,
                                          gamma=gamma,
+                                         brightness=cfg.gain,
                                          near_color=near, far_color=far),
                             screen=_screens[_mon])
     overlay.show()
@@ -215,13 +218,13 @@ def main() -> int:
     def apply_settings():
         """Push the (possibly just-changed) settings into the live radar."""
         acfg.contrast, acfg.floor_db = _sens_to_contrast_floor(cfg.sensitivity)
-        acfg.gain = cfg.gain
         acfg.decay_ms = cfg.decay_ms
         baseline.amount = max(0.0, min(100.0, cfg.adapt)) / 100.0
         st = overlay.style_
         st.tick_fraction, st.gamma = _size_to_tick_gamma(cfg.size)
         st.depth = cfg.thickness
         st.opacity = cfg.opacity
+        st.brightness = cfg.gain
         st.near_color, st.far_color = _colours(cfg.color)
         if st.segments != cfg.segments:
             st.segments = cfg.segments
@@ -244,7 +247,8 @@ def main() -> int:
 
     def open_settings():
         if _win["w"] is None:
-            _win["w"] = SettingsWindow(cfg, apply_settings, on_test=start_test)
+            _win["w"] = SettingsWindow(cfg, apply_settings, on_test=start_test,
+                                       get_levels=cap.get_levels)
         w = _win["w"]
         w.show(); w.raise_(); w.activateWindow()
 

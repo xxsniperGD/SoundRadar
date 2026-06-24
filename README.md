@@ -26,10 +26,15 @@ brighter the louder/closer it is.
 - **Click-through overlay** — input passes straight to the game; works over
   borderless-windowed games. Not an injected overlay, so it's anti-cheat-safe.
 - **Tray app + control panel** — a tray dot to start/pause/quit, and a live
-  settings window: sensitivity, size, fade, number of blocks, bar thickness,
-  opacity, **colour picker**, **adapt** (favour events over constant noise),
-  headphone volume, and **multi-monitor** selection. Everything applies live and
-  is saved.
+  settings window: sensitivity, **size** and **brightness** (independent — one
+  changes how big blocks grow, the other how vivid they are), fade, number of
+  blocks, bar thickness, opacity, **colour picker**, **adapt** (favour events
+  over constant noise), headphone volume, and **multi-monitor** selection.
+  Everything applies live and is saved.
+- **Built-in capture check** — a **Check** tab shows a live level bar per
+  channel and a one-line verdict (*direction detected* / *collapsed to mono* /
+  *silence*), so you can confirm your audio routing is feeding real surround
+  without leaving the app.
 
 ## Two modes
 

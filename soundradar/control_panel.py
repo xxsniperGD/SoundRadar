@@ -10,7 +10,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import settings as settings_mod
 from .settings import PRESET_FIELDS, Settings
-from .audio import list_loopback_devices
+from .audio import list_loopback_devices, rms_to_dbfs
 
 ACCENT = "#4ECDC4"        # refined muted teal
 ACCENT_SOFT = "rgba(78, 205, 196, 0.12)"
@@ -53,15 +53,22 @@ QLabel#infotitle {{ color: #ffffff; font-weight: 600; }}
 QToolTip {{ background: #1d2029; color: #e9ebf1; border: 1px solid #2a2e39;
             padding: 4px 6px; }}
 QInputDialog, QMessageBox {{ background: #14161c; }}
+QProgressBar {{ background: #1d2029; border: 1px solid #2a2e39; border-radius: 5px;
+                height: 12px; }}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
 """
 
 
 class SettingsWindow(QtWidgets.QWidget):
-    def __init__(self, settings: Settings, on_change, on_test=None):
+    def __init__(self, settings: Settings, on_change, on_test=None,
+                 get_levels=None):
         super().__init__(None)
         self.s = settings
         self.on_change = on_change
         self.on_test = on_test
+        self._get_levels = get_levels      # () -> Levels, for the Check tab
+        self._diag_n = 0                   # channel count the bars are built for
+        self._diag_bars = {}               # index -> (QProgressBar, value label)
         self._rows = []          # (field, slider, disp_fn, value_label)
         self._presets = settings_mod.load_presets()
         self.setWindowTitle("SoundRadar")
@@ -89,11 +96,17 @@ class SettingsWindow(QtWidgets.QWidget):
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(self._radar_tab(), "Radar")
         tabs.addTab(self._setup_tab(), "Setup")
+        tabs.addTab(self._diag_tab(), "Check")
         root.addWidget(tabs)
 
         foot = QtWidgets.QLabel("Changes apply live and save automatically.")
         foot.setObjectName("hint")
         root.addWidget(foot)
+
+        # poll the live capture for the Check tab (cheap; only paints when shown)
+        self._diag_timer = QtCore.QTimer(self)
+        self._diag_timer.timeout.connect(self._update_diag)
+        self._diag_timer.start(120)
 
     # -- presets ---------------------------------------------------------
     def _preset_bar(self):
@@ -233,6 +246,102 @@ class SettingsWindow(QtWidgets.QWidget):
         v.addWidget(card)
         v.addStretch(1)
         return w
+
+    def _diag_tab(self):
+        """Live capture check — per-channel levels + a surround/mono verdict.
+        This is the diag.py test built into the app."""
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(12, 8, 12, 12); v.setSpacing(12)
+
+        card = QtWidgets.QGroupBox("Live capture")
+        cv = QtWidgets.QVBoxLayout(card)
+        cv.setContentsMargins(16, 18, 16, 12); cv.setSpacing(10)
+
+        self._diag_verdict = QtWidgets.QLabel("Waiting for audio…")
+        vf = self._diag_verdict.font(); vf.setBold(True); vf.setPointSize(13)
+        self._diag_verdict.setFont(vf)
+        cv.addWidget(self._diag_verdict)
+
+        sub = QtWidgets.QLabel(
+            "Play a sound with a clear direction. For real surround the bars "
+            "should differ. If every bar moves together, it's being collapsed "
+            "to mono.")
+        sub.setObjectName("hint"); sub.setWordWrap(True)
+        cv.addWidget(sub)
+
+        self._diag_host = QtWidgets.QWidget()
+        self._diag_host_v = QtWidgets.QVBoxLayout(self._diag_host)
+        self._diag_host_v.setContentsMargins(0, 4, 0, 0)
+        self._diag_host_v.setSpacing(6)
+        cv.addWidget(self._diag_host)
+        v.addWidget(card)
+
+        tip = QtWidgets.QLabel(
+            "All bars equal? Turn Windows “Mono audio” OFF and set the game to "
+            "7.1. Bars at the floor (no movement) = nothing is reaching the "
+            "capture device.")
+        tip.setObjectName("hint"); tip.setWordWrap(True)
+        v.addWidget(tip)
+        v.addStretch(1)
+        return w
+
+    def _rebuild_diag_rows(self, n, labels):
+        while self._diag_host_v.count():
+            item = self._diag_host_v.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._diag_bars = {}
+        for i in range(n):
+            row = QtWidgets.QWidget()
+            h = QtWidgets.QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0); h.setSpacing(8)
+            lab = QtWidgets.QLabel(labels[i] if i < len(labels) else f"ch{i}")
+            lab.setFixedWidth(32)
+            bar = QtWidgets.QProgressBar()
+            bar.setMinimum(0); bar.setMaximum(100); bar.setTextVisible(False)
+            bar.setFixedHeight(12)
+            val = QtWidgets.QLabel("—"); val.setObjectName("hint")
+            val.setFixedWidth(46)
+            val.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                             | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            h.addWidget(lab); h.addWidget(bar, 1); h.addWidget(val)
+            self._diag_host_v.addWidget(row)
+            self._diag_bars[i] = (bar, val)
+
+    def _update_diag(self):
+        if self._get_levels is None or not self.isVisible():
+            return
+        lv = self._get_levels()
+        n = int(getattr(lv, "channels", 0))
+        if n <= 0 or lv.rms.size == 0:
+            self._diag_verdict.setText("● No audio yet")
+            self._diag_verdict.setStyleSheet("color:#757b87;")
+            return
+        if n != self._diag_n:
+            self._rebuild_diag_rows(n, lv.labels)
+            self._diag_n = n
+        db = rms_to_dbfs(lv.rms)
+        allvals, any_loud = [], False
+        for i in range(n):
+            d = float(db[i]) if i < db.size else -120.0
+            allvals.append(d)
+            bar, val = self._diag_bars[i]
+            bar.setValue(int(max(0.0, min(100.0, (d + 60.0) / 60.0 * 100.0))))
+            val.setText("—" if d <= -119.0 else f"{d:.0f} dB")
+            any_loud = any_loud or d > -55.0
+        # A mono collapse makes EVERY channel identical -> spread ~0. Real
+        # direction leaves some channels loud and others quiet -> big spread.
+        spread = (max(allvals) - min(allvals)) if allvals else 0.0
+        if not any_loud:
+            self._diag_verdict.setText("● Silence — nothing on this device")
+            self._diag_verdict.setStyleSheet("color:#757b87;")
+        elif spread > 6.0:
+            self._diag_verdict.setText("● Direction detected — radar will work")
+            self._diag_verdict.setStyleSheet(f"color:{ACCENT};")
+        else:
+            self._diag_verdict.setText("● Mono / uniform — collapsed, no direction")
+            self._diag_verdict.setStyleSheet("color:#e0a030;")
 
     # -- helpers ---------------------------------------------------------
     def _card(self, title):

@@ -76,6 +76,7 @@ class OverlayStyle:
     min_alpha: int = 120        # brightness of a just-audible block (0..255)
     gamma: float = 0.8          # <1 = sounds reach big size sooner (more growth)
     opacity: float = 0.85       # overall transparency (1 = solid, lower = see-through)
+    brightness: float = 1.0     # scales block brightness ONLY (not its size)
     # Palette: bright magenta — rare in games, high contrast on any background.
     far_color: QtGui.QColor = None
     near_color: QtGui.QColor = None
@@ -215,13 +216,15 @@ class OverlayWindow(QtWidgets.QWidget):
                 continue
             x, y, nx, ny, tx, ty, _ang = tk
             vv = b ** st.gamma
-            # this block's own loudness -> its length along the edge + brightness
+            # loudness -> LENGTH along the edge (Size). Brightness is a separate
+            # multiplier so the two sliders don't both change apparent size.
             halfw = max(st.min_halfw, slot_half * vv)
-            edge_alpha = int(st.min_alpha + (255 - st.min_alpha) * vv)
+            bv = min(1.0, vv * st.brightness)
+            edge_alpha = int(st.min_alpha + (255 - st.min_alpha) * bv)
             col = QtGui.QColor(
-                int(far.red() + (near.red() - far.red()) * vv),
-                int(far.green() + (near.green() - far.green()) * vv),
-                int(far.blue() + (near.blue() - far.blue()) * vv))
+                int(far.red() + (near.red() - far.red()) * bv),
+                int(far.green() + (near.green() - far.green()) * bv),
+                int(far.blue() + (near.blue() - far.blue()) * bv))
             c0 = QtGui.QColor(col); c0.setAlpha(int(edge_alpha * st.opacity))
             c1 = QtGui.QColor(col); c1.setAlpha(0)
             grad = QtGui.QLinearGradient(x, y, x + nx * depth, y + ny * depth)
