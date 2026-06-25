@@ -59,6 +59,12 @@ def list_loopback_devices() -> list:
             if getattr(m, "isloopback", False)]
 
 
+def list_output_devices() -> list:
+    """Physical/virtual playback devices — for choosing where the mono mix
+    plays in surround mode (e.g. your headset)."""
+    return list(sc.all_speakers())
+
+
 def _resolve_mic(cfg: CaptureConfig):
     if cfg.device_name is None:
         spk = sc.default_speaker()

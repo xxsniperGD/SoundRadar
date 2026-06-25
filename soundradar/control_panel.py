@@ -10,7 +10,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import settings as settings_mod
 from .settings import PRESET_FIELDS, Settings
-from .audio import list_loopback_devices, rms_to_dbfs
+from .audio import list_loopback_devices, list_output_devices, rms_to_dbfs
 
 ACCENT = "#4ECDC4"        # refined muted teal
 ACCENT_SOFT = "rgba(78, 205, 196, 0.12)"
@@ -228,7 +228,32 @@ class SettingsWindow(QtWidgets.QWidget):
         combo.currentIndexChanged.connect(
             lambda idx: self._set("monitor", combo.itemData(idx)))
         g.addWidget(combo, 0, 1, 1, 2)
-        self._row(g, 1, "Volume", "out_gain", 0, 100, mul=100)
+
+        g.addWidget(QtWidgets.QLabel("Output"), 1, 0)
+        self._out = QtWidgets.QComboBox()
+        try:
+            out_names = [s.name for s in list_output_devices()]
+        except Exception:       # noqa: BLE001 — never block the panel on audio
+            out_names = []
+        self._out.addItems(out_names or ["Headphones"])
+        # match the saved value even if only a substring is stored (e.g. "Headphones")
+        cur = next((nm for nm in out_names if self.s.output_device
+                    and self.s.output_device.lower() in nm.lower()), None)
+        if cur:
+            self._out.setCurrentText(cur)
+        elif self.s.output_device:
+            self._out.insertItem(0, self.s.output_device)
+            self._out.setCurrentIndex(0)
+        self._out.setToolTip("Surround mode plays the mono mix here — pick your "
+                             "headset. (Stereo mode ignores this.)")
+        self._out.currentTextChanged.connect(
+            lambda t: self._set("output_device", t))
+        g.addWidget(self._out, 1, 1, 1, 2)
+
+        self._row(g, 2, "Volume", "out_gain", 0, 100, mul=100)
+        outnote = QtWidgets.QLabel("Restart SoundRadar to apply an output change.")
+        outnote.setObjectName("hint"); outnote.setWordWrap(True)
+        g.addWidget(outnote, 3, 0, 1, 3)
         v.addWidget(disp)
 
         card = QtWidgets.QFrame(); card.setObjectName("card")
